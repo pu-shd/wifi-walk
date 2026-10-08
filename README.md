@@ -82,6 +82,10 @@ poor stop, the terminal bell rings so you notice without looking at the screen.
 
 ## AP map
 
+The map only works where macOS shows the BSSID, which current versions don't
+(see the next section). It's kept for older macOS versions and in case Apple
+relaxes the restriction.
+
 The map is a CSV file of BSSID-to-name pairs. A BSSID prefix matches every
 radio and SSID on that AP, so you need only one line per AP. See
 [`examples/ap-map.csv`](examples/ap-map.csv).
@@ -94,11 +98,12 @@ a0:b1:c2:d3:e5:a, AP-12
 Get the BSSIDs from your wireless controller. If macOS shows them, you can
 also take them from the `bssid` column of an earlier walk.
 
-## macOS hides the BSSID on recent versions
+## macOS hides the BSSID
 
-Admins report that since macOS 14.5, `wdutil` may print `<redacted>` in place of the SSID and
-BSSID. Apple treats them as location data. When that happens, wifi-walk tells
-you at startup and falls back as follows:
+Since about macOS 14.5, `wdutil` prints `<redacted>` in place of the SSID and
+BSSID, even under `sudo`. This has been confirmed on macOS 26 (Tahoe). Apple
+treats these values as location data. When they're hidden, wifi-walk tells you
+at startup and falls back as follows:
 
 - It treats a channel change as a roam, since neighbouring APs are normally on
   different channels.
