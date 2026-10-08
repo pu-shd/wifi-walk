@@ -1,0 +1,13 @@
+#!/bin/sh
+# Test stand-in for /usr/bin/wdutil. Each "info" call prints the next fixture
+# named in $MOCK_WDUTIL_SEQ (space-separated, from $MOCK_FIXTURES); the last
+# one repeats. The word "FAIL" makes that call exit 1.
+[ "$1" = info ] || { echo "mock wdutil: unsupported: $*" >&2; exit 64; }
+: "${MOCK_STATE:?}" "${MOCK_WDUTIL_SEQ:?}" "${MOCK_FIXTURES:?}"
+n=$(cat "$MOCK_STATE" 2>/dev/null || echo 0)
+n=$((n + 1)); echo "$n" > "$MOCK_STATE"
+set -- $MOCK_WDUTIL_SEQ
+[ "$n" -gt $# ] && n=$#
+eval "f=\${$n}"
+if [ "$f" = FAIL ]; then echo "wdutil: must be run as root" >&2; exit 1; fi
+cat "$MOCK_FIXTURES/$f.txt"

@@ -1,0 +1,57 @@
+————————————————————————————————————————————————————————————————————
+NETWORK
+    Primary IPv4         : en0 (Wi-Fi / 1A2B3C4D-0000-0000-0000-000000000000)
+                         : 10.0.0.23
+    Primary IPv6         : None
+    DNS Addresses        : 10.0.0.1
+    Apple                : Reachable
+————————————————————————————————————————————————————————————————————
+WIFI
+    MAC Address          : 3a:11:22:33:44:55 (hw=f0:11:22:33:44:55)
+    Interface Name       : en0
+    Power                : On [On]
+    Op Mode              : STA
+    SSID                 : ExampleNet
+    BSSID                : 02:aa:bb:cc:dd:ee
+    RSSI                 : -60 dBm
+    CCA                  : 12 %
+    Noise                : -90 dBm
+    Tx Rate              : 2401.0 Mbps
+    Security             : WPA2 Enterprise
+    PHY Mode             : 11ax
+    MCS Index            : 9
+    Guard Interval       : 800
+    NSS                  : 2
+    Channel              : 6g37/160
+    Country Code         : US
+    Scan Cache Count     : 31
+    NetworkServiceID     : 1A2B3C4D-0000-0000-0000-000000000000
+    IPv4 Config Method   : DHCP
+    IPv4 Address         : 10.0.0.23
+    IPv4 Router          : 10.0.0.1
+    IPv6 Config Method   : Automatic
+    IPv6 Address         : None
+    IPv6 Router          : None
+    DHCP Server          : 10.0.0.1
+    DHCP Lease Start     : 2026-10-08 09:12:01 +0000
+    DHCP Lease Duration  : 3600s
+    DHCP Lease Expiry    : 2026-10-08 10:12:01 +0000
+    DHCP Lease Renew     : 2026-10-08 09:42:01 +0000
+    Domain Name          : example.org
+    Domain Search        : example.org
+————————————————————————————————————————————————————————————————————
+BLUETOOTH
+    Power                : On
+    Address              : f0:11:22:33:44:66
+    Discoverable         : No
+    Connectable          : Yes
+    Scanning             : No
+    Devices Paired       : 2
+    Devices Connected    : 0
+————————————————————————————————————————————————————————————————————
+AWDL
+    Power                : Off
+————————————————————————————————————————————————————————————————————
+POWER
+    Power Source         : Battery
+————————————————————————————————————————————————————————————————————

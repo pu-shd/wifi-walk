@@ -1,0 +1,8 @@
+# AP map for wifi-walk.sh -m
+# bssid (or prefix), AP name
+#
+# Each AP broadcasts several BSSIDs (one per radio and SSID), usually differing
+# only in the last hex digit or two. A prefix covers all of them. Find BSSIDs
+# with your controller/dashboard, or from the bssid column of a previous walk.
+a0:b1:c2:d3:e4:7, AP-07
+a0:b1:c2:d3:e5:a, AP-12
