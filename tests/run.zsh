@@ -320,7 +320,8 @@ run "ap07-good ap07-good ap12-good" -n 2 -m $TMP/map.csv <<< $'admin\ny\nCorrido
 expect_rc 0
 has "Switching to admin: su asks for admin's password"
 [[ $SULOG == admin ]] && ok || fail "su log: '$SULOG'"
-[[ $SUDOLOG == *"wifi-walk.sh -U $(id -un) -o ${TMP:a}/log.csv -p location -n 2 -i 0 -c 0 -b ask -m ${TMP:a}/map.csv -B"* ]] &&
+# (the script path is whatever it resolves to, e.g. bin/wifi-walk under Homebrew)
+[[ $SUDOLOG == *"${SCRIPT:A} -U $(id -un) -o ${TMP:a}/log.csv -p location -n 2 -i 0 -c 0 -b ask -m ${TMP:a}/map.csv -B"* ]] &&
   ok || fail "re-run command line: $SUDOLOG"
 [[ $SUDOLOG != *"-n "*"wdutil"* ]] && ok || fail "re-run as root still used sudo for wdutil"
 setverbose_calls "1 0"

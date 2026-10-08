@@ -10,7 +10,7 @@ emulate -R zsh
 setopt pipe_fail no_unset extended_glob
 zmodload zsh/datetime
 
-readonly VERSION=1.1.0
+readonly VERSION=1.1.1
 readonly PROG=${0:t}
 readonly SCRIPT=${0:A}
 
