@@ -1,14 +1,21 @@
 #!/bin/sh
-# Test stand-in for id. "id -Gn" prints $MOCK_GROUPS (default "staff admin");
-# "id -u NAME" knows only the accounts in $MOCK_USERS (default "admin").
-# Anything else goes to the real id.
+# Test stand-in for id. "id -Gn" prints $MOCK_GROUPS (default "staff admin").
+# "id -u NAME" / "id -un NAME" know only the accounts in $MOCK_USERS (default
+# "admin"), matched case-insensitively as on macOS. Anything else goes to the
+# real id.
 case "$1" in
   -Gn) echo "${MOCK_GROUPS:-staff admin}"; exit 0 ;;
-  -u)
+  -u|-un)
     if [ $# -gt 1 ]; then
-      [ "$2" = -- ] && shift
-      for u in ${MOCK_USERS:-admin}; do [ "$u" = "$2" ] && { echo 502; exit 0; }; done
-      echo "id: $2: no such user" >&2; exit 1
+      flag=$1; shift; [ "$1" = -- ] && shift
+      want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+      for u in ${MOCK_USERS:-admin}; do
+        if [ "$(printf '%s' "$u" | tr '[:upper:]' '[:lower:]')" = "$want" ]; then
+          [ "$flag" = -un ] && echo "$u" || echo 502
+          exit 0
+        fi
+      done
+      echo "id: $1: no such user" >&2; exit 1
     fi ;;
 esac
 for d in /usr/bin /bin; do [ -x "$d/id" ] && exec "$d/id" "$@"; done

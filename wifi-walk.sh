@@ -10,7 +10,7 @@ emulate -R zsh
 setopt pipe_fail no_unset extended_glob
 zmodload zsh/datetime
 
-readonly VERSION=1.0.0
+readonly VERSION=1.1.0
 readonly PROG=${0:t}
 readonly SCRIPT=${0:A}
 
@@ -420,15 +420,46 @@ summary() {
   done
 }
 
+# Expand $NAME and ${NAME} (e.g. $HOST) in typed input; nothing else is
+# evaluated.
+expand_vars() {
+  local s=$1 out= name
+  while [[ $s =~ '\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))' ]]; do
+    name=${match[2]:-${match[3]}}
+    out+=${s[1,MBEGIN-1]}${(P)name:-}
+    s=${s[MEND+1,-1]}
+  done
+  REPLY=$out$s
+}
+
+# Canonical account name for NAME in REPLY (lookups are case-insensitive on
+# macOS); also tries NAME without a domain, as in "host.local".
+resolve_account() {
+  local n
+  [[ -n $1 ]] || return 1
+  for n in $1 ${1%%.*}; do
+    REPLY=$(id -un -- $n 2>/dev/null) && [[ -n $REPLY ]] && return 0
+  done
+  return 1
+}
+
 # Root is needed for wdutil and ipconfig setverbose. Three ways to get it:
 # already root (e.g. run under sudo); sudo as yourself; or, without sudo
 # rights, su to an account that has them and re-run this script as root.
 setup_privileges() {
   (( IS_ROOT )) && return 0
+  local me=$(id -un) guess
   if [[ -z $ADMIN && " $(id -Gn 2>/dev/null) " != *" admin "* ]]; then
-    print -r -- "$(id -un) isn't an administrator, and wdutil needs one."
-    ask "Account with sudo to switch to via su (Enter to try sudo as $(id -un)): " ADMIN || exit 1
-    trim "$ADMIN"; ADMIN=$REPLY
+    print -r -- "$me isn't an administrator, and wdutil needs one."
+    # Admin accounts are often named after the host; offer that if it exists.
+    if resolve_account "$HOST" && [[ $REPLY != $me ]]; then
+      guess=$REPLY
+      ask "Account with sudo to switch to via su [$guess] (- to try sudo as $me): " ADMIN || exit 1
+    else
+      ask "Account with sudo to switch to via su (Enter to try sudo as $me): " ADMIN || exit 1
+    fi
+    trim "$ADMIN"; ADMIN=${REPLY:-$guess}
+    [[ $ADMIN == - ]] && ADMIN=
   fi
   [[ -n $ADMIN ]] && rerun_as_admin
 
@@ -443,7 +474,9 @@ setup_privileges() {
 # Re-run this script as root through ADMIN's sudo. Paths are already absolute
 # and the log is handed back to the current user (-U). Does not return.
 rerun_as_admin() {
-  id -u -- $ADMIN >/dev/null 2>&1 || die "no such account: $ADMIN"
+  expand_vars "$ADMIN"; local expanded=$REPLY
+  resolve_account "$expanded" || die "no such account: $ADMIN${${ADMIN:#$expanded}:+ ($expanded)}"
+  ADMIN=$REPLY
   local -a cmd=(${commands[zsh]:-/bin/zsh} $SCRIPT -U $(id -un) -o $OUT
                 -p $PROMPT_MODE -n $SAMPLES -i $INTERVAL -c $COUNT -b $REVEAL)
   [[ -n $MAP_FILE ]] && cmd+=(-m $MAP_FILE)

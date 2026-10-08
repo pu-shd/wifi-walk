@@ -23,6 +23,13 @@ Requires macOS and zsh, the default shell. There's nothing to install.
 if your account doesn't have them.
 
 ```sh
+brew install pu-orfe/tap/wifi-walk
+wifi-walk
+```
+
+or, without Homebrew:
+
+```sh
 curl -O https://raw.githubusercontent.com/pu-shd/wifi-walk/main/wifi-walk.sh
 chmod +x wifi-walk.sh
 ./wifi-walk.sh
@@ -38,6 +45,16 @@ setups:
 | **Can sudo** (an admin) | wifi-walk calls `sudo` and keeps sudo authorised in the background for the rest of the walk, so it doesn't ask for your password again partway through. |
 | **Can't sudo, but you can `su` to an account that can** | Run `./wifi-walk.sh -a ACCOUNT`. If you aren't in the `admin` group, wifi-walk asks for the account instead. It runs `su ACCOUNT`, then `sudo`, so you enter ACCOUNT's password for `su` and, unless sudo already has it cached, again for `sudo`. Then it re-runs itself as root, with the paths and Desktop worked out from your account. The log is handed back to you as its owner. |
 | **Already root** (e.g. `sudo ./wifi-walk.sh`) | Runs directly. If it creates a new log, it gives ownership to `$SUDO_USER`. |
+
+When wifi-walk asks for the account:
+
+- **`$HOST`, `${HOST}` and other `$NAME` references are expanded.** Nothing
+  else you type is evaluated. `-a` does the same.
+- **Names are matched without regard to case,** and a domain suffix such as
+  `.local` is dropped if needed. So `$HOST` finds `pu-mac01` on a Mac named
+  `PU-MAC01`.
+- **If an account named after the host exists, it's offered as the default,**
+  so Enter alone switches to it. Type `-` to try sudo as yourself instead.
 
 Use `-a` instead of `su ACCOUNT -c 'sudo ./wifi-walk.sh'`. Run that way, the
 log would default to ACCOUNT's Desktop and belong to ACCOUNT.

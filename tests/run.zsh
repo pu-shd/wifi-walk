@@ -16,7 +16,9 @@ CUR=
 
 # Mock knobs for the next run(); reset after each.
 REDACT=0 IP_VERBOSE=0 IP_MODE=
-M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0
+M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0 M_USERS=admin
+# The host name as the script will see it, for host-named admin accounts.
+HOSTNAME_SHORT=$(env -i zsh -fc 'print -r -- ${HOST%%.*}')
 # run SEQ [args...] <<< input   -> sets RC, OUT (stdout+stderr), CSV, IPLOG
 run() {
   local seq=$1; shift
@@ -25,7 +27,7 @@ run() {
         WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
         MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state MOCK_WDUTIL_SEQ="$seq" \
         MOCK_REDACT=$REDACT MOCK_IPCONFIG_VERBOSE=$IP_VERBOSE MOCK_IPCONFIG_MODE=$IP_MODE \
-        MOCK_GROUPS=$M_GROUPS MOCK_SUDO_FAIL=$M_SUDO_FAIL WIFI_WALK_ASSUME_ROOT=$M_ROOT \
+        MOCK_GROUPS=$M_GROUPS MOCK_SUDO_FAIL=$M_SUDO_FAIL WIFI_WALK_ASSUME_ROOT=$M_ROOT MOCK_USERS=$M_USERS \
         zsh $SCRIPT -o $TMP/log.csv -i 0 -B "$@" 2>&1)
   RC=$?
   CSV=$(cat $TMP/log.csv 2>/dev/null || true)
@@ -33,7 +35,7 @@ run() {
   SUDOLOG=$(cat $TMP/state.sudo 2>/dev/null || true)
   SULOG=$(cat $TMP/state.su 2>/dev/null || true)
   REDACT=0 IP_VERBOSE=0 IP_MODE=
-  M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0
+  M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0 M_USERS=admin
 }
 setverbose_calls() {  # expected sequence, e.g. "1 0" or ""
   local got=${(j: :)${(M)${(@f)IPLOG}:#setverbose *}#setverbose }
@@ -337,6 +339,32 @@ expect_rc 0; lacks "isn't an administrator"; has "Loaded 3 AP map entries"; has 
 [[ -s "$TMP/my walks/it's here.csv" ]] && ok || fail "log not written at the relative -o path"
 run ap07-good -a nobody <<< 'q'
 expect_rc 1; has "no such account: nobody"
+
+t "privileges: \$VARS in the account name are expanded and canonicalised"
+M_GROUPS=staff M_USERS="admin ${(L)HOSTNAME_SHORT}"
+run ap07-good -n 1 <<< $'-\nq'
+expect_rc 0
+has "Account with sudo to switch to via su [${(L)HOSTNAME_SHORT}] (- to try sudo as"
+has "sudo may ask for your password"; [[ -z $SULOG ]] && ok || fail "su used after '-': $SULOG"
+M_GROUPS=staff M_USERS="admin ${(L)HOSTNAME_SHORT}"
+run ap07-good -n 1 <<< $'\nA\nq'
+expect_rc 0; [[ $SULOG == ${(L)HOSTNAME_SHORT} ]] && ok || fail "Enter did not pick the host account: '$SULOG'"
+M_GROUPS=staff M_USERS="admin ${(L)HOSTNAME_SHORT}"
+run ap07-good -n 1 <<< $'$HOST\nA\nq'
+expect_rc 0; [[ $SULOG == ${(L)HOSTNAME_SHORT} ]] && ok || fail "\$HOST not expanded/canonicalised: '$SULOG'"
+has "Switching to ${(L)HOSTNAME_SHORT}:"
+M_GROUPS=staff M_USERS="admin ${(L)HOSTNAME_SHORT}"
+run ap07-good -n 1 <<< $'${HOST}.local\nA\nq'
+expect_rc 0; [[ $SULOG == ${(L)HOSTNAME_SHORT} ]] && ok || fail "\${HOST}.local not resolved: '$SULOG'"
+M_GROUPS=staff
+run ap07-good <<< $'$NO_SUCH_VAR-x\nq'
+expect_rc 1; has "no such account: \$NO_SUCH_VAR-x (-x)"
+M_GROUPS=staff
+run ap07-good <<< $'$(touch $TMP/pwned)\nq'
+expect_rc 1; [[ ! -e $TMP/pwned ]] && ok || fail "command substitution was evaluated"
+M_GROUPS=staff
+run ap07-good -n 1 <<< $'\nA\nq'
+expect_rc 0; has "(Enter to try sudo as"; [[ -z $SULOG ]] && ok || fail "su used without a host account"
 
 t "-b validation"
 run ap07-good -b maybe </dev/null; expect_rc 1; has "-b must be ask, yes or no"
