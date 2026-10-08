@@ -12,6 +12,7 @@ zmodload zsh/datetime
 
 readonly VERSION=1.0.0
 readonly PROG=${0:t}
+readonly SCRIPT=${0:A}
 
 # RSSI thresholds (dBm). -67 is the usual floor for voice/video; -75 is
 # roughly where data starts to suffer.
@@ -32,6 +33,10 @@ START_WATCH=0
 COUNT=0
 BELL=1
 REVEAL=ask
+ADMIN=              # -a: account to su to for sudo
+OWNER=              # -U / $SUDO_USER: who should own the log when we run as root
+# wdutil and ipconfig setverbose need root. WIFI_WALK_ASSUME_ROOT is for tests.
+IS_ROOT=$(( EUID == 0 || ${WIFI_WALK_ASSUME_ROOT:-0} ))
 
 typeset -gA W S AP_MAP
 typeset -ga SUDO P_LABEL P_RSSI
@@ -69,6 +74,8 @@ Options:
   -c N      in watch mode, stop after N samples (default: until a key press)
   -b MODE   when macOS hides the BSSID, reveal it by turning on ipconfig's
             verbose mode for the walk: ask (default), yes, or no
+  -a USER   you don't have sudo but USER does: su to USER and run this
+            script as root through sudo (asked for if you're not an admin)
   -B        no terminal bell on poor signal
   -h        show this help
   -V        show version
@@ -413,6 +420,39 @@ summary() {
   done
 }
 
+# Root is needed for wdutil and ipconfig setverbose. Three ways to get it:
+# already root (e.g. run under sudo); sudo as yourself; or, without sudo
+# rights, su to an account that has them and re-run this script as root.
+setup_privileges() {
+  (( IS_ROOT )) && return 0
+  if [[ -z $ADMIN && " $(id -Gn 2>/dev/null) " != *" admin "* ]]; then
+    print -r -- "$(id -un) isn't an administrator, and wdutil needs one."
+    ask "Account with sudo to switch to via su (Enter to try sudo as $(id -un)): " ADMIN || exit 1
+    trim "$ADMIN"; ADMIN=$REPLY
+  fi
+  [[ -n $ADMIN ]] && rerun_as_admin
+
+  print "wdutil needs administrator rights; sudo may ask for your password."
+  sudo -v || die "sudo failed; if another account has sudo, use -a ACCOUNT"
+  SUDO=(sudo -n)
+  # keep the sudo timestamp fresh until we exit
+  { while sleep 50; do kill -0 $$ 2>/dev/null && sudo -n -v 2>/dev/null || exit; done } </dev/null >/dev/null 2>&1 &!
+  KEEPALIVE=$!
+}
+
+# Re-run this script as root through ADMIN's sudo. Paths are already absolute
+# and the log is handed back to the current user (-U). Does not return.
+rerun_as_admin() {
+  id -u -- $ADMIN >/dev/null 2>&1 || die "no such account: $ADMIN"
+  local -a cmd=(${commands[zsh]:-/bin/zsh} $SCRIPT -U $(id -un) -o $OUT
+                -p $PROMPT_MODE -n $SAMPLES -i $INTERVAL -c $COUNT -b $REVEAL)
+  [[ -n $MAP_FILE ]] && cmd+=(-m $MAP_FILE)
+  (( START_WATCH )) && cmd+=(-w)
+  (( BELL )) || cmd+=(-B)
+  print -r -- "Switching to $ADMIN: su asks for $ADMIN's password, then sudo may ask again."
+  exec su $ADMIN -c "sudo ${(j: :)${(@qq)cmd}}"
+}
+
 cleanup() {
   restore_verbose
   [[ -n $KEEPALIVE ]] && kill $KEEPALIVE 2>/dev/null
@@ -427,7 +467,7 @@ ask() {  # prompt varname -> 1 on EOF
 
 main() {
   local opt
-  while getopts ':o:p:m:n:i:c:b:wBhV' opt; do
+  while getopts ':o:p:m:n:i:c:b:a:U:wBhV' opt; do
     case $opt in
       o) OUT=$OPTARG ;;
       p) PROMPT_MODE=$OPTARG ;;
@@ -437,6 +477,9 @@ main() {
       c) COUNT=$OPTARG ;;
       w) START_WATCH=1 ;;
       b) REVEAL=$OPTARG ;;
+      a) ADMIN=$OPTARG ;;
+      U) OWNER=$OPTARG ;;     # set by the -a re-run
+
       B) BELL=0 ;;
       h) usage; exit 0 ;;
       V) print -r -- "$PROG $VERSION"; exit 0 ;;
@@ -454,14 +497,31 @@ main() {
   [[ $OSTYPE == darwin* || -n ${WIFI_WALK_WDUTIL:-} ]] || die "macOS only (needs wdutil)"
   [[ -x $WDUTIL ]] || die "wdutil not found at $WDUTIL"
 
+  # Run as root via sudo or the -a re-run: files belong to the real user.
+  if (( IS_ROOT )); then OWNER=${OWNER:-${SUDO_USER:-}}; else OWNER=; fi
+  [[ $OWNER == root ]] && OWNER=
+
   if [[ -z $OUT ]]; then
-    local stamp dir=$PWD
+    local stamp dir=$PWD home=$HOME
+    [[ -n $OWNER ]] && home=${userdirs[$OWNER]:-$HOME}
     strftime -s stamp '%Y%m%d-%H%M%S' $EPOCHSECONDS
-    [[ -d $HOME/Desktop ]] && dir=$HOME/Desktop
+    [[ -d $home/Desktop ]] && dir=$home/Desktop
     OUT=$dir/wifi-walk-$stamp.csv
   fi
+  # Absolute, so they survive a re-run from another account.
+  OUT=${OUT:a}
+  [[ -n $MAP_FILE ]] && MAP_FILE=${MAP_FILE:a}
+
+  # Check before any password prompts.
+  [[ -z $MAP_FILE || -r $MAP_FILE ]] || die "cannot read AP map: $MAP_FILE"
+
+  setup_privileges
+
   if [[ ! -s $OUT ]]; then
     print -r -- $CSV_HEADER >> $OUT || die "cannot write $OUT"
+    if [[ -n $OWNER ]]; then
+      ${commands[chown]:-/usr/sbin/chown} -- $OWNER $OUT 2>/dev/null || warn "could not make $OWNER the owner of $OUT"
+    fi
   elif [[ $(head -n 1 -- $OUT) != $CSV_HEADER ]]; then
     die "$OUT exists but is not a $PROG log; choose another file with -o"
   fi
@@ -471,14 +531,6 @@ main() {
   trap cleanup EXIT
   trap 'cleanup; summary; exit 130' INT TERM
 
-  if (( EUID != 0 )); then
-    print "wdutil needs administrator rights; sudo may ask for your password."
-    sudo -v || die "sudo failed"
-    SUDO=(sudo -n)
-    # keep the sudo timestamp fresh until we exit
-    { while sleep 50; do kill -0 $$ 2>/dev/null && sudo -n -v 2>/dev/null || exit; done } </dev/null >/dev/null 2>&1 &!
-    KEEPALIVE=$!
-  fi
 
   # Fail now, not at the first stop, if wdutil doesn't work.
   read_wifi || die "wdutil failed: ${W[error]}"

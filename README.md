@@ -18,14 +18,29 @@ Location [Room 210]: Stairwell east
     ! roamed while sampling: AP-07 (a0:b1:c2:d3:e4:71) -> AP-03 (a0:b1:c2:d3:e6:31)
 ```
 
-Requires macOS (it uses `wdutil`, which needs `sudo`) and zsh, the default
-shell. There's nothing to install.
+Requires macOS and zsh, the default shell. There's nothing to install.
+`wdutil` needs administrator rights; see [Administrator rights](#administrator-rights)
+if your account doesn't have them.
 
 ```sh
 curl -O https://raw.githubusercontent.com/pu-shd/wifi-walk/main/wifi-walk.sh
 chmod +x wifi-walk.sh
 ./wifi-walk.sh
 ```
+
+## Administrator rights
+
+`wdutil` and `ipconfig setverbose` must run as root. wifi-walk handles three
+setups:
+
+| Your account | What happens |
+|---|---|
+| **Can sudo** (an admin) | wifi-walk calls `sudo` and keeps sudo authorised in the background for the rest of the walk, so it doesn't ask for your password again partway through. |
+| **Can't sudo, but you can `su` to an account that can** | Run `./wifi-walk.sh -a ACCOUNT`. If you aren't in the `admin` group, wifi-walk asks for the account instead. It runs `su ACCOUNT`, then `sudo`, so you enter ACCOUNT's password for `su` and, unless sudo already has it cached, again for `sudo`. Then it re-runs itself as root, with the paths and Desktop worked out from your account. The log is handed back to you as its owner. |
+| **Already root** (e.g. `sudo ./wifi-walk.sh`) | Runs directly. If it creates a new log, it gives ownership to `$SUDO_USER`. |
+
+Use `-a` instead of `su ACCOUNT -c 'sudo ./wifi-walk.sh'`. Run that way, the
+log would default to ACCOUNT's Desktop and belong to ACCOUNT.
 
 ## Labelling stops: location or AP
 
@@ -74,6 +89,7 @@ your Mac roams. To start in watch mode, use `-w`.
 -w        start in watch mode
 -c N      stop watch mode after N samples
 -b MODE   reveal a hidden BSSID via ipconfig verbose mode: ask | yes | no
+-a USER   no sudo yourself: su to USER (who has sudo) and run as root
 -B        no bell on poor signal
 ```
 

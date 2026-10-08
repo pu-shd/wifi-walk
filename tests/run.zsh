@@ -16,6 +16,7 @@ CUR=
 
 # Mock knobs for the next run(); reset after each.
 REDACT=0 IP_VERBOSE=0 IP_MODE=
+M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0
 # run SEQ [args...] <<< input   -> sets RC, OUT (stdout+stderr), CSV, IPLOG
 run() {
   local seq=$1; shift
@@ -24,11 +25,15 @@ run() {
         WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
         MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state MOCK_WDUTIL_SEQ="$seq" \
         MOCK_REDACT=$REDACT MOCK_IPCONFIG_VERBOSE=$IP_VERBOSE MOCK_IPCONFIG_MODE=$IP_MODE \
+        MOCK_GROUPS=$M_GROUPS MOCK_SUDO_FAIL=$M_SUDO_FAIL WIFI_WALK_ASSUME_ROOT=$M_ROOT \
         zsh $SCRIPT -o $TMP/log.csv -i 0 -B "$@" 2>&1)
   RC=$?
   CSV=$(cat $TMP/log.csv 2>/dev/null || true)
   IPLOG=$(cat $TMP/state.ipconfig 2>/dev/null || true)
+  SUDOLOG=$(cat $TMP/state.sudo 2>/dev/null || true)
+  SULOG=$(cat $TMP/state.su 2>/dev/null || true)
   REDACT=0 IP_VERBOSE=0 IP_MODE=
+  M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0
 }
 setverbose_calls() {  # expected sequence, e.g. "1 0" or ""
   local got=${(j: :)${(M)${(@f)IPLOG}:#setverbose *}#setverbose }
@@ -283,6 +288,55 @@ expect_rc 0; setverbose_calls "1 0"
 REDACT=1
 run "disconnected ap07-good" -b yes -n 1 <<< $'A\nq'
 expect_rc 0; csv_col ",survey,1,1," bssid a0:b1:c2:d3:e4:71
+
+t "privileges: admin user uses sudo directly"
+run ap07-good -n 1 <<< $'A\nq'
+expect_rc 0
+has "sudo may ask for your password"; lacks "isn't an administrator"
+[[ -z $SULOG ]] && ok || fail "su was used: $SULOG"
+[[ $SUDOLOG == *"-v"* && $SUDOLOG == *"-n "*"/wdutil info"* ]] && ok || fail "sudo log: $SUDOLOG"
+
+t "privileges: already root needs no sudo, log owned by SUDO_USER"
+M_ROOT=1
+REDACT=1
+run ap07-good -n 1 -b yes <<< $'A\nq'
+expect_rc 0; lacks "sudo may ask"; setverbose_calls "1 0"
+[[ -z $SUDOLOG ]] && ok || fail "sudo was used as root: $SUDOLOG"
+csv_rows survey 1
+
+t "privileges: non-admin, Enter tries sudo; failure suggests -a"
+M_GROUPS=staff
+run ap07-good -n 1 <<< $'\nA\nq'
+expect_rc 0; has "isn't an administrator"; has "sudo may ask"; csv_rows survey 1
+M_GROUPS=staff M_SUDO_FAIL=1
+run ap07-good <<< $'\nq'
+expect_rc 1; has "sudo failed; if another account has sudo, use -a ACCOUNT"
+
+t "privileges: non-admin names an admin account at the prompt"
+M_GROUPS=staff M_SUDO_FAIL=1 REDACT=1
+run "ap07-good ap07-good ap12-good" -n 2 -m $TMP/map.csv <<< $'admin\ny\nCorridor\nq'
+expect_rc 0
+has "Switching to admin: su asks for admin's password"
+[[ $SULOG == admin ]] && ok || fail "su log: '$SULOG'"
+[[ $SUDOLOG == *"wifi-walk.sh -U $(id -un) -o ${TMP:a}/log.csv -p location -n 2 -i 0 -c 0 -b ask -m ${TMP:a}/map.csv -B"* ]] &&
+  ok || fail "re-run command line: $SUDOLOG"
+[[ $SUDOLOG != *"-n "*"wdutil"* ]] && ok || fail "re-run as root still used sudo for wdutil"
+setverbose_calls "1 0"
+csv_col ",survey,1,2," connected_ap AP-12
+[[ -O $TMP/log.csv ]] && ok || fail "log not owned by the invoking user"
+lacks "could not make"
+
+t "privileges: -a with awkward paths, and unknown accounts"
+mkdir -p "$TMP/my walks"; cp $TMP/map.csv "$TMP/my walks/ap's map.csv"
+rm -f $TMP/state*(N)
+OUT=$(cd "$TMP/my walks" && print q | env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home NO_COLOR=1 \
+      WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
+      MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state MOCK_WDUTIL_SEQ=ap07-good MOCK_GROUPS=staff \
+      zsh $SCRIPT -a admin -o "it's here.csv" -m "ap's map.csv" -w -c 1 -i 0 2>&1); RC=$?
+expect_rc 0; lacks "isn't an administrator"; has "Loaded 3 AP map entries"; has "Watch mode ended (1 samples)"
+[[ -s "$TMP/my walks/it's here.csv" ]] && ok || fail "log not written at the relative -o path"
+run ap07-good -a nobody <<< 'q'
+expect_rc 1; has "no such account: nobody"
 
 t "-b validation"
 run ap07-good -b maybe </dev/null; expect_rc 1; has "-b must be ask, yes or no"
