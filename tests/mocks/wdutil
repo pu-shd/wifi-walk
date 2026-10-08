@@ -5,6 +5,15 @@
 # SSID and BSSID are shown as <redacted>, as on macOS 14.5 and later.
 [ "$1" = info ] || { echo "mock wdutil: unsupported: $*" >&2; exit 64; }
 : "${MOCK_STATE:?}" "${MOCK_WDUTIL_SEQ:?}" "${MOCK_FIXTURES:?}"
+# Wi-Fi off, or still rejoining after networksetup turned it on: not connected,
+# and the fixture sequence doesn't advance.
+off=$(cat "$MOCK_STATE.power" 2>/dev/null)
+left=$(cat "$MOCK_STATE.rejoin" 2>/dev/null || echo 0)
+if [ "$off" = off ] || [ "$left" -gt 0 ]; then
+  [ "$off" = off ] || echo $((left - 1)) > "$MOCK_STATE.rejoin"
+  echo disconnected > "$MOCK_STATE.last"
+  exec cat "$MOCK_FIXTURES/disconnected.txt"
+fi
 n=$(cat "$MOCK_STATE" 2>/dev/null || echo 0)
 n=$((n + 1)); echo "$n" > "$MOCK_STATE"
 set -- $MOCK_WDUTIL_SEQ

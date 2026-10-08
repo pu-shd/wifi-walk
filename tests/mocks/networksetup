@@ -1,0 +1,13 @@
+#!/bin/sh
+# Test stand-in for networksetup: only "-setairportpower IFACE on|off".
+# Power state goes to $MOCK_STATE.power; turning on makes the next
+# $MOCK_REJOIN_READS (default 2) wdutil reads show "not connected", as while
+# the Mac rejoins. MOCK_NETWORKSETUP_FAIL=1 makes every call fail. Calls are
+# logged to $MOCK_STATE.networksetup.
+: "${MOCK_STATE:?}"
+echo "$*" >> "$MOCK_STATE.networksetup"
+[ "${MOCK_NETWORKSETUP_FAIL:-0}" = 1 ] && { echo "** Error: not permitted" >&2; exit 1; }
+[ "$1" = -setairportpower ] || { echo "mock networksetup: unsupported: $*" >&2; exit 64; }
+echo "$3" > "$MOCK_STATE.power"
+[ "$3" = on ] && echo "${MOCK_REJOIN_READS:-2}" > "$MOCK_STATE.rejoin"
+exit 0

@@ -89,11 +89,42 @@ Mac is using the AP you're standing next to:
 | Enter     | sample the previous stop again                           |
 | `#text`   | attach a note to the previous stop (`#dead spot by door`) |
 | `w`       | watch mode: one line per sample, flags roams; any key returns |
+| `r`       | reconnect test at the current stop (below)                |
 | `?`       | help                                                     |
 | `q`       | quit and print the weakest stops                         |
 
+The prompt always shows how to quit, e.g.
+`Location [Room 120] (Enter again, r reconnect, q quit):`.
+
 Watch mode is handy while you walk between stops. It shows when, and where,
 your Mac roams. To start in watch mode, use `-w`.
+
+## Reconnect test
+
+`r` (or `-R` to run it after every stop) turns Wi-Fi off for 2 seconds, turns
+it back on, and records:
+
+- **How long the Mac takes to rejoin.** You're offline for about this long
+  each time it reconnects.
+- **Which AP it picks when connecting fresh,** compared with the AP it was on.
+  Roaming between APs is the client's decision, and many clients cling to an
+  AP long after a better one is in range. A fresh connection picks the
+  strongest AP, so a different AP here means the Mac was sticking:
+
+```
+[5] Room 120  reconnect test
+    Wi-Fi off, on, rejoining......
+    before  AP-07 (a0:b1:c2:d3:e4:71)  -78 dBm  ch 36
+    after   AP-12 (a0:b1:c2:d3:e5:a1)  -52 dBm  ch 149  (rejoined in 3.4s)
+    ! connecting fresh picked a different AP (26 dB): it had been sticking to AP-07
+```
+
+If the Mac rejoins a different network (SSID), wifi-walk says so instead.
+Wi-Fi is turned back on even if you press Ctrl-C while it's off.
+
+A reading taken with Wi-Fi simply off isn't offered. With the radio off,
+macOS reports no signal, noise or AP, and it reports the noise floor only
+while connected, so there would be nothing to record.
 
 ## Options
 
@@ -104,6 +135,7 @@ your Mac roams. To start in watch mode, use `-w`.
 -n N      samples per stop (default 3)
 -i SEC    seconds between samples (default 1)
 -w        start in watch mode
+-R        reconnect test after every stop
 -c N      stop watch mode after N samples
 -b MODE   reveal a hidden BSSID via ipconfig verbose mode: ask | yes | no
 -a USER   no sudo yourself: su to USER (who has sudo) and run as root

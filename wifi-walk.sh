@@ -10,7 +10,7 @@ emulate -R zsh
 setopt pipe_fail no_unset extended_glob
 zmodload zsh/datetime
 
-readonly VERSION=1.1.1
+readonly VERSION=1.2.0
 readonly PROG=${0:t}
 readonly SCRIPT=${0:A}
 
@@ -24,6 +24,10 @@ readonly CSV_HEADER=timestamp,mode,point,sample,location,nearest_ap,connected_ap
 
 WDUTIL=${WIFI_WALK_WDUTIL:-/usr/bin/wdutil}
 IPCONFIG=${WIFI_WALK_IPCONFIG:-/usr/sbin/ipconfig}
+NETWORKSETUP=${WIFI_WALK_NETWORKSETUP:-/usr/sbin/networksetup}
+# Reconnect test: how long Wi-Fi stays off, and how long to wait for a rejoin.
+OFF_SECONDS=${WIFI_WALK_OFF_SECONDS:-2}
+REJOIN_TIMEOUT=${WIFI_WALK_REJOIN_TIMEOUT:-30}
 OUT=
 PROMPT_MODE=location
 MAP_FILE=
@@ -48,6 +52,8 @@ IFACE=en0
 USE_IPCONFIG=0      # read BSSID/SSID from ipconfig when wdutil hides them
 VERBOSE_SET=0       # we turned ipconfig verbose mode on and must undo it
 WARNED_LOST=0
+RECONNECT_EACH=0    # -R: reconnect test after every stop
+WIFI_OFF=0          # we turned Wi-Fi off and must turn it back on
 
 usage() {
   cat <<EOF
@@ -71,6 +77,7 @@ Options:
   -n N      samples per stop (default: $SAMPLES)
   -i SEC    seconds between samples (default: $INTERVAL)
   -w        start in watch mode
+  -R        run a reconnect test (r) after every stop
   -c N      in watch mode, stop after N samples (default: until a key press)
   -b MODE   when macOS hides the BSSID, reveal it by turning on ipconfig's
             verbose mode for the walk: ask (default), yes, or no
@@ -85,6 +92,8 @@ At the prompt:
   Enter     sample the previous stop again
   #<text>   attach a note to the previous stop
   w         watch mode: sample continuously and flag roams; any key returns
+  r         reconnect test: turn Wi-Fi off for ${OFF_SECONDS}s and on again, time the
+            rejoin, and compare the AP it picks fresh with the one it was on
   ?         this help
   q         quit and print a summary
 
@@ -249,7 +258,7 @@ read_wifi() {
 
 # Take one sample, fill S, and log it.
 sample() {
-  local mode=$1 point=$2 n=$3 loc=$4 near=$5
+  local mode=$1 point=$2 n=$3 loc=$4 near=$5 note=${6:-}
   S=()
   now; S[ts]=$REPLY
   read_wifi
@@ -298,7 +307,7 @@ sample() {
   csv_row "${S[ts]}" $mode $point $n "$loc" "$near" "${S[ap]:-}" "${S[bssid]:-}" \
     "${S[ssid]:-}" "${S[band]:-}" "${S[channel]:-}" "${S[width]:-}" "${S[rssi]:-}" \
     "${S[noise]:-}" "${S[snr]:-}" "${S[cca]:-}" "${S[rate]:-}" "${S[phy]:-}" \
-    "${S[mcs]:-}" "${S[nss]:-}" "${S[security]:-}" "${S[error]:-}"
+    "${S[mcs]:-}" "${S[nss]:-}" "${S[security]:-}" "${S[error]:-$note}"
 }
 
 # Sets REPLY to good/fair/poor and RATING_COLOR.
@@ -370,6 +379,68 @@ survey_point() {
   fi
   P_LABEL+=("$title") P_RSSI+=($avg)
   [[ $rating == poor ]] && (( BELL )) && [[ -t 1 ]] && print -n $'\a'
+  return 0
+}
+
+wifi_power() {  # on|off
+  "${SUDO[@]}" "$NETWORKSETUP" -setairportpower $IFACE $1 >/dev/null 2>&1
+}
+
+# Turn Wi-Fi off and on, time the rejoin, and compare the AP the Mac picks
+# when connecting fresh with the one it was on. A different, stronger AP
+# means it had been sticking to a far one.
+reconnect_test() {
+  local loc=$1 near=$2 t0 secs b_label b_rssi b_key b_ch b_ssid
+  local title=${loc:-}
+  [[ -n $near ]] && title+="${title:+ · }near AP $near"
+  (( ++POINT ))
+  print -r -- "${C_BOLD}[$POINT] ${title:+$title  }reconnect test${C_OFF}"
+  sample reconnect $POINT 0 "$loc" "$near" "before reconnect"
+  if [[ -z ${S[rssi]:-} ]]; then
+    print -r -- "    ${C_POOR}not connected, nothing to compare; skipped${C_OFF}"
+    return 0
+  fi
+  ap_label; b_label=$REPLY b_rssi=${S[rssi]} b_key=${S[apkey]:-} b_ch=${S[channel]:-?} b_ssid=${S[ssid]:-}
+
+  print -rn -- "    Wi-Fi off"
+  if ! wifi_power off; then
+    print; warn "could not turn Wi-Fi off; reconnect test skipped"
+    return 0
+  fi
+  WIFI_OFF=1
+  sleep $OFF_SECONDS
+  print -rn -- ", on, rejoining"
+  wifi_power on && WIFI_OFF=0 || { print; warn "could not turn Wi-Fi back on; trying again on exit" }
+  t0=$EPOCHREALTIME
+  while :; do
+    read_wifi
+    [[ ${W[RSSI]:-0 dBm} == -<1->* ]] && break
+    (( EPOCHREALTIME - t0 >= REJOIN_TIMEOUT )) && break
+    print -n .
+    sleep 0.5
+  done
+  printf -v secs '%.1f' $(( EPOCHREALTIME - t0 ))
+  print
+
+  if [[ ${W[RSSI]:-0 dBm} != -<1->* ]]; then
+    sample reconnect $POINT 1 "$loc" "$near" "did not rejoin within ${REJOIN_TIMEOUT}s"
+    print -r -- "    ${C_POOR}! did not rejoin within ${REJOIN_TIMEOUT}s${C_OFF}"
+    (( BELL )) && [[ -t 1 ]] && print -n $'\a'
+    return 0
+  fi
+  sample reconnect $POINT 1 "$loc" "$near" "rejoined in ${secs}s"
+  print -r -- "    before  $b_label  $b_rssi dBm  ch $b_ch"
+  if [[ -n ${S[rssi]:-} ]]; then
+    ap_label
+    print -r -- "    after   $REPLY  ${S[rssi]} dBm  ch ${S[channel]:-?}  (rejoined in ${secs}s)"
+    if [[ -n $b_ssid && -n ${S[ssid]:-} && ${S[ssid]} != $b_ssid ]]; then
+      print -r -- "    ${C_FAIR}! rejoined a different network (${S[ssid]}, was $b_ssid); check its priority in Wi-Fi settings${C_OFF}"
+    elif [[ -n $b_key && ${S[apkey]:-} != $b_key ]]; then
+      print -r -- "    ${C_FAIR}! connecting fresh picked a different AP ($(( S[rssi] - b_rssi )) dB): it had been sticking to $b_label${C_OFF}"
+    fi
+  else
+    print -r -- "    after   ${S[error]:-lost the connection again}"
+  fi
   return 0
 }
 
@@ -481,12 +552,17 @@ rerun_as_admin() {
                 -p $PROMPT_MODE -n $SAMPLES -i $INTERVAL -c $COUNT -b $REVEAL)
   [[ -n $MAP_FILE ]] && cmd+=(-m $MAP_FILE)
   (( START_WATCH )) && cmd+=(-w)
+  (( RECONNECT_EACH )) && cmd+=(-R)
   (( BELL )) || cmd+=(-B)
   print -r -- "Switching to $ADMIN: su asks for $ADMIN's password, then sudo may ask again."
   exec su $ADMIN -c "sudo ${(j: :)${(@qq)cmd}}"
 }
 
 cleanup() {
+  if (( WIFI_OFF )); then
+    wifi_power on || warn "could not turn Wi-Fi back on; run: networksetup -setairportpower $IFACE on"
+    WIFI_OFF=0
+  fi
   restore_verbose
   [[ -n $KEEPALIVE ]] && kill $KEEPALIVE 2>/dev/null
   KEEPALIVE=
@@ -500,7 +576,7 @@ ask() {  # prompt varname -> 1 on EOF
 
 main() {
   local opt
-  while getopts ':o:p:m:n:i:c:b:a:U:wBhV' opt; do
+  while getopts ':o:p:m:n:i:c:b:a:U:wRBhV' opt; do
     case $opt in
       o) OUT=$OPTARG ;;
       p) PROMPT_MODE=$OPTARG ;;
@@ -509,6 +585,7 @@ main() {
       i) INTERVAL=$OPTARG ;;
       c) COUNT=$OPTARG ;;
       w) START_WATCH=1 ;;
+      R) RECONNECT_EACH=1 ;;
       b) REVEAL=$OPTARG ;;
       a) ADMIN=$OPTARG ;;
       U) OWNER=$OPTARG ;;     # set by the -a re-run
@@ -588,18 +665,23 @@ main() {
   print -r -- "Type a label and press Enter at each stop; ? for help, q to quit."
   (( START_WATCH )) && watch_mode
 
-  local in near
+  local in near hint label last
   while :; do
     print
     case $PROMPT_MODE in
-      ap) ask "Nearest AP${LAST_NEAR:+ [$LAST_NEAR]}: " in || break ;;
-      *)  ask "Location${LAST_LOC:+ [$LAST_LOC]}: " in || break ;;
+      ap) label="Nearest AP" last=$LAST_NEAR ;;
+      *)  label=Location last=$LAST_LOC ;;
     esac
+    if [[ -n $last ]]; then hint="Enter again, r reconnect, q quit"; else hint="q quit, ? help"; fi
+    ask "$label${last:+ [$last]} ${C_DIM}($hint)${C_OFF}: " in || break
     trim "$in"; in=$REPLY
     case $in in
       q|Q|quit|exit) break ;;
       \?|help) usage; continue ;;
       w|W) watch_mode; continue ;;
+      r|R)
+        if [[ -z $LAST_LOC && -z $LAST_NEAR ]]; then print "Type a label first."; continue; fi
+        reconnect_test "$LAST_LOC" "$LAST_NEAR"; continue ;;
       \#*)
         if (( ! POINT )); then warn "no stop to attach a note to yet"; continue; fi
         trim "${in#\#}"; local note=$REPLY
@@ -608,7 +690,9 @@ main() {
         continue ;;
       '')
         if [[ -z $LAST_LOC && -z $LAST_NEAR ]]; then print "Type a label first (or q to quit)."; continue; fi
-        survey_point "$LAST_LOC" "$LAST_NEAR"; continue ;;
+        survey_point "$LAST_LOC" "$LAST_NEAR"
+        (( RECONNECT_EACH )) && reconnect_test "$LAST_LOC" "$LAST_NEAR"
+        continue ;;
     esac
     case $PROMPT_MODE in
       location) LAST_LOC=$in LAST_NEAR= ;;
@@ -619,6 +703,7 @@ main() {
         trim "$near"; LAST_NEAR=$REPLY ;;
     esac
     survey_point "$LAST_LOC" "$LAST_NEAR"
+    (( RECONNECT_EACH )) && reconnect_test "$LAST_LOC" "$LAST_NEAR"
   done
 
   cleanup

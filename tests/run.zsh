@@ -17,6 +17,7 @@ CUR=
 # Mock knobs for the next run(); reset after each.
 REDACT=0 IP_VERBOSE=0 IP_MODE=
 M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0 M_USERS=admin
+M_REJOIN=2 M_TIMEOUT=5 M_NS_FAIL=0
 # The host name as the script will see it, for host-named admin accounts.
 HOSTNAME_SHORT=$(env -i zsh -fc 'print -r -- ${HOST%%.*}')
 # run SEQ [args...] <<< input   -> sets RC, OUT (stdout+stderr), CSV, IPLOG
@@ -28,6 +29,8 @@ run() {
         MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state MOCK_WDUTIL_SEQ="$seq" \
         MOCK_REDACT=$REDACT MOCK_IPCONFIG_VERBOSE=$IP_VERBOSE MOCK_IPCONFIG_MODE=$IP_MODE \
         MOCK_GROUPS=$M_GROUPS MOCK_SUDO_FAIL=$M_SUDO_FAIL WIFI_WALK_ASSUME_ROOT=$M_ROOT MOCK_USERS=$M_USERS \
+        WIFI_WALK_NETWORKSETUP=$HERE/mocks/networksetup WIFI_WALK_OFF_SECONDS=0 \
+        WIFI_WALK_REJOIN_TIMEOUT=$M_TIMEOUT MOCK_REJOIN_READS=$M_REJOIN MOCK_NETWORKSETUP_FAIL=$M_NS_FAIL \
         zsh $SCRIPT -o $TMP/log.csv -i 0 -B "$@" 2>&1)
   RC=$?
   CSV=$(cat $TMP/log.csv 2>/dev/null || true)
@@ -36,6 +39,8 @@ run() {
   SULOG=$(cat $TMP/state.su 2>/dev/null || true)
   REDACT=0 IP_VERBOSE=0 IP_MODE=
   M_GROUPS="staff admin" M_SUDO_FAIL=0 M_ROOT=0 M_USERS=admin
+  M_REJOIN=2 M_TIMEOUT=5 M_NS_FAIL=0
+  NSLOG=$(cat $TMP/state.networksetup 2>/dev/null || true)
 }
 setverbose_calls() {  # expected sequence, e.g. "1 0" or ""
   local got=${(j: :)${(M)${(@f)IPLOG}:#setverbose *}#setverbose }
@@ -366,6 +371,59 @@ expect_rc 1; [[ ! -e $TMP/pwned ]] && ok || fail "command substitution was evalu
 M_GROUPS=staff
 run ap07-good -n 1 <<< $'\nA\nq'
 expect_rc 0; has "(Enter to try sudo as"; [[ -z $SULOG ]] && ok || fail "su used without a host account"
+
+t "prompt shows how to quit"
+run ap07-good -n 1 <<< $'Hall\nq'
+has "Location (q quit, ? help): "
+has "Location [Hall] (Enter again, r reconnect, q quit): "
+run ap07-good -n 1 -p ap <<< $'7\nq'
+has "Nearest AP (q quit, ? help): "; has "Nearest AP [7] (Enter again, r reconnect, q quit): "
+
+t "reconnect test: fresh connection picks a different AP"
+run "ap07-good ap07-weak ap07-weak ap12-good" -n 1 -m $TMP/map.csv <<< $'Room 9\nr\nq'
+expect_rc 0
+[[ ${(j:,:)${(f)NSLOG}} == "-setairportpower en0 off,-setairportpower en0 on" ]] && ok || fail "networksetup calls: $NSLOG"
+has "[2] Room 9  reconnect test"; has "Wi-Fi off, on, rejoining.."
+has "before  AP-07 (a0:b1:c2:d3:e4:71)  -78 dBm  ch 36"
+has "after   AP-12 (a0:b1:c2:d3:e5:a1)  -52 dBm  ch 149  (rejoined in"
+has "connecting fresh picked a different AP (26 dB): it had been sticking to AP-07"
+csv_rows reconnect 2
+csv_col ",reconnect,2,0," note "before reconnect"
+csv_col ",reconnect,2,1," connected_ap AP-12
+[[ $CSV == *",reconnect,2,1,"*",rejoined in "<->.<->s* ]] && ok || fail "no rejoin time in csv"
+
+run "ap07-good ap07-good ap07-good ap12-guest" -n 1 <<< $'Room 9\nr\nq'
+has "rejoined a different network (GuestNet, was ExampleNet)"; lacks "sticking to"
+
+t "reconnect test: same AP, -R after every stop, r before any stop"
+run "ap07-good" -n 1 -R <<< $'r\nA\n\nq'
+expect_rc 0
+has "Type a label first."
+csv_rows reconnect 4; lacks "different AP"
+count_lines "$NSLOG" "*off"; (( REPLY == 2 )) && ok || fail "expected 2 power-offs, got $REPLY"
+
+t "reconnect test: no rejoin, networksetup failure, not connected"
+M_REJOIN=1000 M_TIMEOUT=1
+run ap07-good -n 1 <<< $'A\nr\nq'
+expect_rc 0; has "did not rejoin within 1s"
+csv_has "did not rejoin within 1s"
+[[ $NSLOG == *on ]] && ok || fail "Wi-Fi left off: $NSLOG"
+M_NS_FAIL=1
+run ap07-good -n 1 <<< $'A\nr\nq'
+expect_rc 0; has "could not turn Wi-Fi off; reconnect test skipped"
+run disconnected -n 1 <<< $'A\nr\nq'
+expect_rc 0; has "not connected, nothing to compare; skipped"; [[ -z $NSLOG ]] && ok || fail "toggled while disconnected"
+
+t "reconnect test: Wi-Fi turned back on if interrupted while off"
+rm -f $TMP/state8*(N)
+OUT=$(print -l Room q | env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home NO_COLOR=1 \
+      WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
+      WIFI_WALK_NETWORKSETUP=$HERE/mocks/networksetup WIFI_WALK_OFF_SECONDS=3 \
+      MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state8 MOCK_WDUTIL_SEQ=ap07-good \
+      zsh -c "zsh $SCRIPT -o $TMP/int.csv -i 0 -n 1 -R & p=\$!; sleep 1; kill -TERM \$p; wait \$p" 2>&1); RC=$?
+NSLOG=$(<$TMP/state8.networksetup)
+expect_rc 130
+[[ ${(j:,:)${(f)NSLOG}} == "-setairportpower en0 off,-setairportpower en0 on" ]] && ok || fail "networksetup calls: $NSLOG"
 
 t "-b validation"
 run ap07-good -b maybe </dev/null; expect_rc 1; has "-b must be ask, yes or no"
