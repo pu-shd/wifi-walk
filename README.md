@@ -42,7 +42,7 @@ fixed, known point, so a walk from AP to AP gives repeatable readings that
 anyone can retake later without a floor plan. It also tells you whether your
 Mac is using the AP you're standing next to:
 
-- **With an AP map** (`-m`, below) and a visible BSSID, wifi-walk names the AP
+- **With an AP map** (`-m`, below), wifi-walk names the AP
   you're connected to and warns if it isn't the one you're standing at. That
   usually means a sticky client or an AP that's down.
 - **Without one,** it warns when the signal is weaker than -60 dBm while you're
@@ -73,6 +73,7 @@ your Mac roams. To start in watch mode, use `-w`.
 -i SEC    seconds between samples (default 1)
 -w        start in watch mode
 -c N      stop watch mode after N samples
+-b MODE   reveal a hidden BSSID via ipconfig verbose mode: ask | yes | no
 -B        no bell on poor signal
 ```
 
@@ -81,10 +82,6 @@ video), fair is down to -75 dBm, and poor is anything weaker. When you're on a
 poor stop, the terminal bell rings so you notice without looking at the screen.
 
 ## AP map
-
-The map only works where macOS shows the BSSID, which current versions don't
-(see the next section). It's kept for older macOS versions and in case Apple
-relaxes the restriction.
 
 The map is a CSV file of BSSID-to-name pairs. A BSSID prefix matches every
 radio and SSID on that AP, so you need only one line per AP. See
@@ -95,21 +92,32 @@ a0:b1:c2:d3:e4:7, AP-07
 a0:b1:c2:d3:e5:a, AP-12
 ```
 
-Get the BSSIDs from your wireless controller. If macOS shows them, you can
-also take them from the `bssid` column of an earlier walk.
+Get the BSSIDs from your wireless controller, or from the `bssid` column of an
+earlier walk.
 
-## macOS hides the BSSID
+## Where the BSSID comes from
 
 Since about macOS 14.5, `wdutil` prints `<redacted>` in place of the SSID and
-BSSID, even under `sudo`. This has been confirmed on macOS 26 (Tahoe). Apple
-treats these values as location data. When they're hidden, wifi-walk tells you
-at startup and falls back as follows:
+BSSID, even under `sudo`; this is confirmed on macOS 26 (Tahoe). Apple treats
+these values as location data. `ipconfig getsummary` still shows them while
+`ipconfig`'s verbose mode is on, so wifi-walk tries these sources in order:
 
-- It treats a channel change as a roam, since neighbouring APs are normally on
-  different channels.
-- In `-p ap` mode, it uses the weak-signal check described above.
-- Everything else (RSSI, noise, SNR, channel utilisation, rate, PHY mode,
-  MCS) is recorded as usual.
+1. **`wdutil`**, if it shows the BSSID.
+2. **`ipconfig getsummary`**, if verbose mode is already on.
+3. **`ipconfig` with verbose mode switched on for the walk.** wifi-walk asks
+   first (`-b ask`, the default). `-b yes` skips the question and `-b no`
+   never touches it. Verbose mode only makes `ipconfig` log more. wifi-walk
+   switches it off when it exits, including on Ctrl-C. If the script is
+   killed outright, run `sudo ipconfig setverbose 0` yourself.
+4. **Channel changes.** If none of the above works, a change of channel is
+   treated as a roam, since neighbouring APs are normally on different
+   channels. In `-p ap` mode, the weak-signal check still works. Everything
+   else (RSSI, noise, SNR, channel utilisation, rate, PHY mode, MCS) is
+   recorded as usual.
+
+wifi-walk checks this on every sample. If `ipconfig` stops showing the BSSID
+partway through a walk, it warns once and falls back to channel changes, so
+an OS update that removes this route degrades gracefully.
 
 ## Output
 

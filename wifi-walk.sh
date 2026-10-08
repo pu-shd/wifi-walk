@@ -22,6 +22,7 @@ readonly NEAR_AP_RSSI=-60
 readonly CSV_HEADER=timestamp,mode,point,sample,location,nearest_ap,connected_ap,bssid,ssid,band_ghz,channel,width_mhz,rssi_dbm,noise_dbm,snr_db,cca_pct,tx_rate_mbps,phy_mode,mcs,nss,security,note
 
 WDUTIL=${WIFI_WALK_WDUTIL:-/usr/bin/wdutil}
+IPCONFIG=${WIFI_WALK_IPCONFIG:-/usr/sbin/ipconfig}
 OUT=
 PROMPT_MODE=location
 MAP_FILE=
@@ -30,6 +31,7 @@ INTERVAL=1
 START_WATCH=0
 COUNT=0
 BELL=1
+REVEAL=ask
 
 typeset -gA W S AP_MAP
 typeset -ga SUDO P_LABEL P_RSSI
@@ -37,6 +39,10 @@ POINT=0
 LAST_LOC=
 LAST_NEAR=
 KEEPALIVE=
+IFACE=en0
+USE_IPCONFIG=0      # read BSSID/SSID from ipconfig when wdutil hides them
+VERBOSE_SET=0       # we turned ipconfig verbose mode on and must undo it
+WARNED_LOST=0
 
 usage() {
   cat <<EOF
@@ -57,11 +63,12 @@ Options:
   -m FILE   AP map, one "bssid,ap_name" per line, used to name the AP you are
             connected to. A prefix such as "a0:b1:c2:d3:e4:" matches every
             radio/SSID on that AP. Lines starting with # are ignored.
-            Needs a visible BSSID, which recent macOS may hide.
   -n N      samples per stop (default: $SAMPLES)
   -i SEC    seconds between samples (default: $INTERVAL)
   -w        start in watch mode
   -c N      in watch mode, stop after N samples (default: until a key press)
+  -b MODE   when macOS hides the BSSID, reveal it by turning on ipconfig's
+            verbose mode for the walk: ask (default), yes, or no
   -B        no terminal bell on poor signal
   -h        show this help
   -V        show version
@@ -153,6 +160,66 @@ ap_name() {
   return 0
 }
 
+# Sets REPLY to the normalised BSSID; true if it is a real MAC address.
+is_mac() { norm_bssid "$1"; [[ $REPLY == *:*:*:*:*:* ]] }
+
+# BSSID and SSID from ipconfig, which shows them unredacted while its verbose
+# mode is on.
+read_ipconfig() {
+  local line out
+  IP_BSSID= IP_SSID=
+  out=$("$IPCONFIG" getsummary $IFACE 2>/dev/null) || return 0
+  for line in "${(@f)out}"; do
+    if [[ $line =~ '^[[:space:]]*BSSID : (.*)$' ]]; then
+      IP_BSSID=${IP_BSSID:-${match[1]}}
+    elif [[ $line =~ '^[[:space:]]*SSID : (.*)$' ]]; then
+      IP_SSID=${IP_SSID:-${match[1]}}
+    fi
+  done
+}
+
+# wdutil hides the BSSID: try ipconfig as is, then (with consent) with verbose
+# mode on. Returns 1 if the BSSID stays hidden.
+reveal_bssid() {
+  local ans connected=$1
+  [[ -x $IPCONFIG ]] || return 1
+  read_ipconfig
+  if is_mac "$IP_BSSID"; then USE_IPCONFIG=1; return 0; fi
+  [[ $REVEAL == no ]] && return 1
+  # Not connected, so there's no BSSID to judge by; only -b yes goes ahead.
+  [[ $REVEAL == ask ]] && (( ! connected )) && return 1
+  if [[ $REVEAL == ask ]]; then
+    print -r -- "macOS hides the BSSID, which identifies the AP you're connected to."
+    print -r -- "Turning on ipconfig's verbose mode reveals it (ipconfig also logs more);"
+    print -r -- "$PROG turns it off again when it exits."
+    ask "Turn it on for this walk? [Y/n] " ans || return 1
+    [[ $ans == [nN]* ]] && return 1
+  fi
+  if ! "${SUDO[@]}" "$IPCONFIG" setverbose 1 >/dev/null 2>&1; then
+    warn "ipconfig setverbose failed"
+    return 1
+  fi
+  VERBOSE_SET=1
+  # Not connected yet: nothing to verify, so trust it and check per sample.
+  if (( ! connected )); then USE_IPCONFIG=1; return 0; fi
+  read_ipconfig
+  if is_mac "$IP_BSSID"; then
+    USE_IPCONFIG=1
+    print -r -- "BSSID visible via ipconfig."
+    return 0
+  fi
+  warn "ipconfig still hides the BSSID (${IP_BSSID:-blank})"
+  restore_verbose
+  return 1
+}
+
+restore_verbose() {
+  (( VERBOSE_SET )) || return 0
+  "${SUDO[@]}" "$IPCONFIG" setverbose 0 >/dev/null 2>&1 ||
+    warn "could not turn ipconfig verbose mode off; run: sudo ipconfig setverbose 0"
+  VERBOSE_SET=0
+}
+
 # Run wdutil and parse the WIFI section into W. Returns 1 if wdutil failed.
 read_wifi() {
   W=()
@@ -187,13 +254,22 @@ sample() {
     v=${W[Noise]:-}; v=${v%% *}; [[ $v == -<1-> ]] && S[noise]=$v
     v=${W[CCA]:-};   v=${v%% *}; [[ $v == <-> ]] && S[cca]=$v
     v=${W[Tx Rate]:-}; v=${v%% *}; [[ $v == [0-9.]## ]] && S[rate]=$v
-    S[ssid]=${${W[SSID]:-}:#None}
+    S[ssid]=${${${W[SSID]:-}:#None}:#\<redacted\>}
     S[phy]=${W[PHY Mode]:-}
     S[mcs]=${W[MCS Index]:-}
     S[nss]=${W[NSS]:-}
     S[security]=${W[Security]:-}
     norm_bssid "${W[BSSID]:-}"; S[bssid]=$REPLY
     [[ ${S[bssid]} == None ]] && S[bssid]=
+    if [[ ${S[bssid]} != *:*:*:*:*:* && -n ${S[rssi]:-} ]] && (( USE_IPCONFIG )); then
+      read_ipconfig
+      if is_mac "$IP_BSSID"; then
+        S[bssid]=$REPLY
+        [[ -n $IP_SSID && $IP_SSID != \<redacted\> ]] && S[ssid]=$IP_SSID
+      elif (( ! WARNED_LOST++ )); then
+        warn "ipconfig stopped showing the BSSID (${IP_BSSID:-blank}); falling back to channel changes"
+      fi
+    fi
     if [[ -n ${S[rssi]:-} && -n ${S[noise]:-} ]]; then
       S[snr]=$(( S[rssi] - S[noise] ))
     fi
@@ -337,7 +413,12 @@ summary() {
   done
 }
 
-cleanup() { [[ -n $KEEPALIVE ]] && kill $KEEPALIVE 2>/dev/null; KEEPALIVE= }
+cleanup() {
+  restore_verbose
+  [[ -n $KEEPALIVE ]] && kill $KEEPALIVE 2>/dev/null
+  KEEPALIVE=
+  return 0
+}
 
 ask() {  # prompt varname -> 1 on EOF
   print -rn -- "$1"
@@ -346,7 +427,7 @@ ask() {  # prompt varname -> 1 on EOF
 
 main() {
   local opt
-  while getopts ':o:p:m:n:i:c:wBhV' opt; do
+  while getopts ':o:p:m:n:i:c:b:wBhV' opt; do
     case $opt in
       o) OUT=$OPTARG ;;
       p) PROMPT_MODE=$OPTARG ;;
@@ -355,6 +436,7 @@ main() {
       i) INTERVAL=$OPTARG ;;
       c) COUNT=$OPTARG ;;
       w) START_WATCH=1 ;;
+      b) REVEAL=$OPTARG ;;
       B) BELL=0 ;;
       h) usage; exit 0 ;;
       V) print -r -- "$PROG $VERSION"; exit 0 ;;
@@ -364,6 +446,7 @@ main() {
   done
   (( OPTIND > $# )) || die "unexpected argument: ${@[OPTIND]} (see -h)"
   [[ $PROMPT_MODE == (location|ap|both) ]] || die "-p must be location, ap or both"
+  [[ $REVEAL == (ask|yes|no) ]] || die "-b must be ask, yes or no"
   [[ $SAMPLES == <1-> ]] || die "-n must be a positive integer"
   [[ $COUNT == <-> ]] || die "-c must be a non-negative integer"
   [[ $INTERVAL == ([0-9]##(.[0-9]#|)|.[0-9]##) ]] || die "-i must be a number of seconds"
@@ -400,12 +483,20 @@ main() {
   # Fail now, not at the first stop, if wdutil doesn't work.
   read_wifi || die "wdutil failed: ${W[error]}"
   [[ -z ${W[error]:-} ]] || die "could not read Wi-Fi state: ${W[error]}"
+  IFACE=${W[Interface Name]:-en0}
+  local connected=1
   if [[ ${W[RSSI]:-0 dBm} == 0* ]]; then
+    connected=0
     warn "Wi-Fi is not connected; samples will be empty until it is"
-  else
-    norm_bssid "${W[BSSID]:-}"
-    [[ $REPLY == *:*:*:*:*:* ]] ||
+  fi
+  # BSSID source, best first: wdutil, ipconfig, ipconfig in verbose mode,
+  # and failing those, channel changes as a stand-in for roams.
+  if ! is_mac "${W[BSSID]:-}" && ! reveal_bssid $connected; then
+    if (( connected )); then
       warn "macOS is hiding the BSSID (${W[BSSID]:-blank}); roams will be inferred from channel changes${MAP_FILE:+ and the AP map can't be used}"
+    elif [[ $REVEAL == ask ]]; then
+      warn "connect before starting (or use -b yes) so $PROG can identify APs"
+    fi
   fi
 
   print -r -- "Logging to $OUT"

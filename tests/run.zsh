@@ -14,16 +14,25 @@ trap 'rm -rf $TMP' EXIT
 integer PASS=0 FAIL=0 TESTS=0
 CUR=
 
-# run SEQ [args...] <<< input   -> sets RC, OUT (stdout+stderr), CSV
+# Mock knobs for the next run(); reset after each.
+REDACT=0 IP_VERBOSE=0 IP_MODE=
+# run SEQ [args...] <<< input   -> sets RC, OUT (stdout+stderr), CSV, IPLOG
 run() {
   local seq=$1; shift
-  rm -f $TMP/state $TMP/log.csv
+  rm -f $TMP/state*(N) $TMP/log.csv
   OUT=$(env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home TMPDIR=$TMP NO_COLOR=1 \
-        WIFI_WALK_WDUTIL=$HERE/mocks/wdutil MOCK_FIXTURES=$HERE/fixtures \
-        MOCK_STATE=$TMP/state MOCK_WDUTIL_SEQ="$seq" \
+        WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
+        MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state MOCK_WDUTIL_SEQ="$seq" \
+        MOCK_REDACT=$REDACT MOCK_IPCONFIG_VERBOSE=$IP_VERBOSE MOCK_IPCONFIG_MODE=$IP_MODE \
         zsh $SCRIPT -o $TMP/log.csv -i 0 -B "$@" 2>&1)
   RC=$?
   CSV=$(cat $TMP/log.csv 2>/dev/null || true)
+  IPLOG=$(cat $TMP/state.ipconfig 2>/dev/null || true)
+  REDACT=0 IP_VERBOSE=0 IP_MODE=
+}
+setverbose_calls() {  # expected sequence, e.g. "1 0" or ""
+  local got=${(j: :)${(M)${(@f)IPLOG}:#setverbose *}#setverbose }
+  [[ $got == $1 ]] && ok || fail "setverbose calls '$got', expected '$1'"
 }
 
 # count_lines TEXT PATTERN
@@ -187,26 +196,96 @@ csv_has ",survey,2,1,'=SUM(A1),"
 t "disconnected Wi-Fi: warned, logged, not counted as signal"
 run disconnected -n 2 <<< $'Closet\nq'
 expect_rc 0
-has "Wi-Fi is not connected"; has "no signal: not connected to Wi-Fi"
+has "Wi-Fi is not connected"; has "connect before starting (or use -b yes)"; lacks "Turn it on"; setverbose_calls ""; has "no signal: not connected to Wi-Fi"
 csv_rows survey 2
 csv_col ",survey,1,1," rssi_dbm ""
 csv_col ",survey,1,1," bssid ""
 
 t "hidden BSSID: one warning, channel-based roams, near-AP heuristic"
-run redacted -m $TMP/map.csv <<< $'A\nB\nq'
+run redacted -b no -m $TMP/map.csv <<< $'A\nB\nq'
 expect_rc 0
 lines_eq "*hiding the BSSID*" 1; has "hiding the BSSID (<redacted>)"
 has "the AP map can't be used"
 has "connected to AP on ch 36  5 GHz"
 csv_col ",survey,1,1," bssid "<redacted>"
 csv_col ",survey,1,1," connected_ap ""
-run "redacted redacted redacted-ch149 redacted-ch149" -c 3 -w <<< 'q'
+run "redacted redacted redacted-ch149 redacted-ch149" -b no -c 3 -w <<< 'q'
 lines_eq "*ROAM*" 1
-run "redacted redacted redacted-ch149" -p ap <<< $'7\nq'
+run "redacted redacted redacted-ch149" -b no -p ap <<< $'7\nq'
 has "roamed while sampling: AP on ch 36 -> AP on ch 149"
 has "only -67 dBm next to AP 7: probably connected to a farther AP, or 7 is down"
-run redacted -p ap <<< $'7\nq'
+run redacted -b no -p ap <<< $'7\nq'
 lacks "next to AP"
+
+t "BSSID source: wdutil when visible, ipconfig untouched"
+run ap07-good <<< $'A\nq'
+expect_rc 0; setverbose_calls ""; lacks "hiding the BSSID"; lacks "Turn it on"
+
+t "BSSID source: ipconfig already verbose"
+REDACT=1 IP_VERBOSE=1
+run ap07-good -m $TMP/map.csv <<< $'A\nq'
+expect_rc 0; setverbose_calls ""; lacks "Turn it on"; lacks "hiding the BSSID"
+csv_col ",survey,1,1," bssid a0:b1:c2:d3:e4:71
+csv_col ",survey,1,1," ssid ExampleNet
+csv_col ",survey,1,1," connected_ap AP-07
+
+t "BSSID source: ipconfig verbose with consent, restored on exit"
+REDACT=1
+run "ap07-good ap07-good ap12-good" -m $TMP/map.csv -n 2 <<< $'y\nCorridor\nq'
+expect_rc 0; setverbose_calls "1 0"
+has "Turn it on for this walk? [Y/n]"; has "BSSID visible via ipconfig."; lacks "hiding the BSSID"
+has "roamed while sampling: AP-07 (a0:b1:c2:d3:e4:71) -> AP-12 (a0:b1:c2:d3:e5:a1)"
+csv_col ",survey,1,2," connected_ap AP-12
+REDACT=1
+run ap07-good -b yes <<< $'A\nq'
+expect_rc 0; setverbose_calls "1 0"; lacks "Turn it on"
+csv_col ",survey,1,1," bssid a0:b1:c2:d3:e4:71
+
+t "BSSID source: verbose restored when terminated"
+REDACT=1
+OUT=$(print q | env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home NO_COLOR=1 \
+      WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
+      MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state5 MOCK_WDUTIL_SEQ=ap07-good MOCK_REDACT=1 \
+      zsh -c "zsh $SCRIPT -o $TMP/kill.csv -b yes -w -i 2 & p=\$!; sleep 1; kill -TERM \$p; wait \$p" 2>&1); RC=$?
+IPLOG=$(<$TMP/state5.ipconfig)
+expect_rc 130; setverbose_calls "1 0"; has "Summary:"
+
+t "BSSID source: declined, -b no, failed, or stuck -> channel fallback"
+REDACT=1
+run ap07-good <<< $'n\nA\nq'
+expect_rc 0; setverbose_calls ""; has "hiding the BSSID (<redacted>)"; has "connected to AP on ch 36"
+REDACT=1
+run ap07-good -b no <<< $'A\nq'
+expect_rc 0; setverbose_calls ""; lacks "Turn it on"; has "hiding the BSSID"
+REDACT=1 IP_MODE=fail-setverbose
+run ap07-good -b yes <<< $'A\nq'
+expect_rc 0; has "ipconfig setverbose failed"; has "hiding the BSSID"; has "connected to AP on ch 36"
+REDACT=1 IP_MODE=stuck
+run ap07-good -b yes <<< $'A\nq'
+expect_rc 0; setverbose_calls "1 0"; has "ipconfig still hides the BSSID (<redacted>)"; has "hiding the BSSID"
+csv_col ",survey,1,1," bssid "<redacted>"
+
+t "BSSID source: ipconfig breaking mid-walk falls back per sample, warns once"
+REDACT=1 IP_VERBOSE=1
+run ap07-good -b yes <<< $'A\nq'
+expect_rc 0; csv_col ",survey,1,1," bssid a0:b1:c2:d3:e4:71
+# ipconfig works at startup, then stops revealing the BSSID
+REDACT=1 IP_VERBOSE=1 IP_MODE=break-after-1
+run ap07-good -b no -n 2 <<< $'A\nB\nq'
+expect_rc 0
+lines_eq "*ipconfig stopped showing the BSSID*" 1
+has "connected to AP on ch 36"
+csv_col ",survey,2,2," bssid "<redacted>"
+
+t "BSSID source: -b yes while disconnected enables ipconfig for later"
+run "disconnected ap07-good" -b yes -n 1 <<< $'A\nq'
+expect_rc 0; setverbose_calls "1 0"
+REDACT=1
+run "disconnected ap07-good" -b yes -n 1 <<< $'A\nq'
+expect_rc 0; csv_col ",survey,1,1," bssid a0:b1:c2:d3:e4:71
+
+t "-b validation"
+run ap07-good -b maybe </dev/null; expect_rc 1; has "-b must be ask, yes or no"
 
 t "wdutil failure at startup is fatal"
 run FAIL <<< $'q'
@@ -220,7 +299,7 @@ csv_has "wdutil: must be run as root"
 t "appends to an existing log, refuses foreign files"
 run ap07-good -n 1 <<< $'One\nq'
 cp $TMP/log.csv $TMP/keep.csv
-OUT=$(env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home NO_COLOR=1 WIFI_WALK_WDUTIL=$HERE/mocks/wdutil \
+OUT=$(env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home NO_COLOR=1 WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
       MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state2 MOCK_WDUTIL_SEQ=ap07-good \
       zsh $SCRIPT -o $TMP/keep.csv -i 0 -n 1 <<< $'Two\nq' 2>&1); RC=$?
 expect_rc 0
@@ -228,14 +307,14 @@ CSV=$(<$TMP/keep.csv)
 count_lines "$CSV" "timestamp,*"; (( REPLY == 1 )) && ok || fail "header duplicated"
 csv_rows survey 2
 print "a,b,c" > $TMP/foreign.csv
-OUT=$(env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home WIFI_WALK_WDUTIL=$HERE/mocks/wdutil \
+OUT=$(env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
       MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state3 MOCK_WDUTIL_SEQ=ap07-good \
       zsh $SCRIPT -o $TMP/foreign.csv <<< 'q' 2>&1); RC=$?
 expect_rc 1; has "is not a wifi-walk.sh log"
 
 t "default output goes to ~/Desktop when present"
 mkdir -p $TMP/home/Desktop
-OUT=$(cd $TMP && env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home WIFI_WALK_WDUTIL=$HERE/mocks/wdutil \
+OUT=$(cd $TMP && env -i PATH="$HERE/mocks:/usr/bin:/bin" HOME=$TMP/home WIFI_WALK_WDUTIL=$HERE/mocks/wdutil WIFI_WALK_IPCONFIG=$HERE/mocks/ipconfig \
       MOCK_FIXTURES=$HERE/fixtures MOCK_STATE=$TMP/state4 MOCK_WDUTIL_SEQ=ap07-good \
       zsh $SCRIPT -i 0 -n 1 <<< $'X\nq' 2>&1); RC=$?
 expect_rc 0

@@ -1,0 +1,43 @@
+#!/bin/sh
+# Test stand-in for /usr/sbin/ipconfig: "setverbose N" and "getsummary IFACE".
+# getsummary reports the SSID/BSSID of the fixture wdutil served last, redacted
+# unless verbose mode is on (initially $MOCK_IPCONFIG_VERBOSE, default 0).
+# MOCK_IPCONFIG_MODE: "fail-setverbose", "stuck" (verbose never unredacts),
+# "broken" (getsummary prints nothing), or "break-after-1" (only the first
+# getsummary unredacts). Calls are logged to $MOCK_STATE.ipconfig.
+: "${MOCK_STATE:?}" "${MOCK_FIXTURES:?}"
+echo "$*" >> "$MOCK_STATE.ipconfig"
+mode=${MOCK_IPCONFIG_MODE:-}
+case $1 in
+  setverbose)
+    [ "$mode" = fail-setverbose ] && { echo "ipconfig: permission denied" >&2; exit 1; }
+    echo "$2" > "$MOCK_STATE.verbose" ;;
+  getsummary)
+    [ "$mode" = broken ] && exit 0
+    calls=$(grep -c '^getsummary' "$MOCK_STATE.ipconfig")
+    [ "$mode" = break-after-1 ] && [ "$calls" -gt 1 ] && mode=stuck
+    v=$(cat "$MOCK_STATE.verbose" 2>/dev/null || echo "${MOCK_IPCONFIG_VERBOSE:-0}")
+    f=$(cat "$MOCK_STATE.last" 2>/dev/null)
+    bssid=$(sed -n -E 's/^    BSSID +: //p' "$MOCK_FIXTURES/$f.txt" 2>/dev/null)
+    ssid=$(sed -n -E 's/^    SSID +: //p' "$MOCK_FIXTURES/$f.txt" 2>/dev/null)
+    if [ "$v" != 1 ] || [ "$mode" = stuck ]; then bssid='<redacted>' ssid='<redacted>'; fi
+    cat <<OUT
+<dictionary> {
+  BSSID : $bssid
+  IPv4 : <array> {
+    0 : <dictionary> {
+      Addresses : <array> {
+        0 : 10.0.0.23
+      }
+    }
+  }
+  InterfaceType : WiFi
+  LinkStatusActive : TRUE
+  NetworkID : 1A2B3C4D-0000-0000-0000-000000000000
+  SSID : $ssid
+  Security : WPA2_Enterprise
+}
+OUT
+    ;;
+  *) echo "mock ipconfig: unsupported: $*" >&2; exit 64 ;;
+esac
